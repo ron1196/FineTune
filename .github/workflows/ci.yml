@@ -54,6 +54,11 @@ jobs:
             CODE_SIGN_IDENTITY=- \
             CODE_SIGNING_REQUIRED=NO
           mv build/DerivedData/Build/Products/Release/FineTune.app "build/FineTune Dev.app"
+          # Hardened runtime refuses to load the vendor-signed Sparkle into an ad-hoc app
+          # ("different Team IDs"), so the artifact would crash on launch.
+          codesign --force --deep --sign - "build/FineTune Dev.app/Contents/Frameworks/Sparkle.framework"
+          codesign --force --sign - --preserve-metadata=entitlements,requirements "build/FineTune Dev.app"
+          codesign --verify --deep --strict "build/FineTune Dev.app"
           ditto -c -k --keepParent "build/FineTune Dev.app" build/FineTune.zip
 
       - name: Upload app
