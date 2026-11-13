@@ -737,6 +737,11 @@ final class AudioEngine {
 
     func setMute(for app: AudioApp, to muted: Bool) {
         volumeState.setMute(for: app.id, to: muted, identifier: app.persistenceIdentifier)
+        // Without a tap there is nothing to silence the process, so the row would show
+        // "muted" while the app keeps playing.
+        if let deviceUID = appDeviceRouting[app.id] {
+            ensureTapExists(for: app, deviceUID: deviceUID)
+        }
         taps[app.id]?.isMuted = muted
     }
 
@@ -1097,6 +1102,8 @@ final class AudioEngine {
             }
         }
 
+        recreateTapsMissingProcesses()
+
         for app in apps {
             guard !appliedPIDs.contains(app.id) else { continue }
             guard !settingsManager.isIgnored(app.persistenceIdentifier) else { continue }
@@ -1209,6 +1216,28 @@ final class AudioEngine {
                 taps[app.id]?.isMuted = true
             }
         }
+    }
+
+    /// A tap's process list is fixed when it is created. When an app gains a process later
+    /// (a new helper, or a child process merged into its row), that process is neither
+    /// controlled nor silenced by `.mutedWhenTapped`, so it plays at full volume while the
+    /// row shows the app's mute/volume. Rebuild the tap so it covers the new process.
+    /// Processes that merely exit don't need a rebuild.
+    private func recreateTapsMissingProcesses() {
+        for app in apps where tapIsMissingProcesses(for: app.id) {
+            logger.info("Process set grew for \(app.name) (PID \(app.id)), recreating tap")
+            let pid: pid_t = app.id
+            Task {
+                // App-list changes can queue this more than once; skip if already rebuilt.
+                guard self.tapIsMissingProcesses(for: pid) else { return }
+                await self.recreateTap(for: pid)
+            }
+        }
+    }
+
+    private func tapIsMissingProcesses(for pid: pid_t) -> Bool {
+        guard let tap = taps[pid], let app = apps.first(where: { $0.id == pid }) else { return false }
+        return !Set(app.processObjectIDs).isSubset(of: Set(tap.app.processObjectIDs))
     }
 
     private func ensureTapExists(for app: AudioApp, deviceUID: String) {
@@ -1894,8 +1923,9 @@ final class AudioEngine {
                 let now = Date()
 
                 for (pid, tap) in self.taps {
-                    // Skip muted apps — no callbacks while muted isn't a health signal
-                    guard !tap.isMuted else { continue }
+                    // Muted taps must be checked too: the IOProc keeps running while muted, and
+                    // `.mutedWhenTapped` only silences the app while the tap is read — a dead
+                    // muted tap lets the app's original audio leak through.
 
                     // Skip PIDs in recovery cooldown to prevent recreation thrashing
                     if let cooldownEnd = self.tapRecoveryCooldownUntil[pid], now < cooldownEnd {
